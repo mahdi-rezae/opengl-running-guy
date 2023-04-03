@@ -1,0 +1,835 @@
+#include <iostream>
+#include <vector>
+#include <cmath>
+#ifdef __APPLE__
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/gl.h>
+#include <GLUT/glut.h>
+#elif _MSC_VER
+#include <glut.h>
+#else
+#include <GL/gl.h>
+#include <GL/glut.h>
+#endif
+
+/////////////////////////////////////////////////////////////////// FIXES
+
+// for radian conversion in sin and cos functions
+#define PI 3.1415926535
+
+// To specify the shape each Object object will take
+
+#define SPHERE 0
+#define CYLINDER 1
+#define RECTANGULARPRISM 2
+
+// a body part with the Object class
+
+#define ROOT_OBJECT true
+#define RELATIVE_OBJECT false
+
+// When commanding a joint to rotate,
+// the following constants are used to
+// specify the axis.
+
+#define X 0
+#define Y 1
+#define Z 2
+
+// To store angles, coordinates and colors
+
+typedef struct coordinates
+{
+    double x, y, z;
+} Coordinates;
+typedef struct angles
+{
+    double x, y, z;
+} Angles;
+typedef struct rgba
+{
+    double red, green, blue, alpha;
+} RGBA;
+
+/////////////////////////////////////////////////////////////////// CAMERA & LIGHT
+
+
+class Camera
+{
+private:
+    double positionX, positionY, positionZ;
+    double lookX, lookY, lookZ;
+    double upX, upY, upZ;
+
+protected:
+    double getRadiusXYZ(void)
+    {
+        return pow(pow(lookX - positionX, 2) +
+                       pow(lookY - positionY, 2) +
+                       pow(lookZ - positionZ, 2),
+                   0.5);
+    }
+    double getRadiusXZ(void)
+    {
+        return pow(pow(lookX - positionX, 2) +
+                       pow(lookZ - positionZ, 2),
+                   0.5);
+    }
+    double getAngleXZ(void)
+    {
+        double res = atan2(positionZ - lookZ, positionX - lookX) * 180.0 / PI;
+        if (res < 0)
+            return res + 360;
+        else
+            return res;
+    }
+
+public:
+    Camera(void) // xz plane
+    {
+        positionX = positionY = positionZ = 0;
+        lookX = lookY = lookZ = 0;
+        upX = upZ = 0;
+        upY = 1;
+    }
+
+    void update(void)
+    {
+        glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);
+        gluLookAt(
+            positionX, positionY, positionZ,
+            lookX, lookY, lookZ,
+            upZ, upY, upZ);
+    }
+
+    void setPosition(double x, double y, double z)
+    {
+        positionX = x;
+        positionY = y;
+        positionZ = z;
+    }
+    void setX(double x)
+    {
+        positionX = x;
+    }
+    void setY(double y)
+    {
+        positionY = y;
+    }
+    void setZ(double z)
+    {
+        positionZ = z;
+    }
+    void setOrigin(double x, double y, double z)
+    {
+        lookX = x;
+        lookY = y;
+        lookZ = z;
+    }
+};
+
+
+class Light
+{
+private:
+    Coordinates light0;
+
+public:
+    Light(void)
+    {
+        light0.x = 2;
+        light0.y = 2;
+        light0.z = 2;
+    }
+    void init(void)
+    {
+        glEnable(GL_LIGHTING);
+        glEnable(GL_LIGHT0);
+        glEnable(GL_COLOR_MATERIAL);
+
+        glColorMaterial(GL_LIGHT0, GL_AMBIENT_AND_DIFFUSE);
+
+        GLfloat light0_amb[] = {0.2, 0.2, 0.2, 1.0};
+        GLfloat light0_dif[] = {0.8, 0.8, 0.8, 1.0};
+        glLightfv(GL_LIGHT0, GL_AMBIENT, light0_amb);
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, light0_dif);
+    }
+    void update(void)
+    {
+        GLfloat light0_pos[] = {light0.x, light0.y, light0.z, 0.0};
+        glLightfv(GL_LIGHT0, GL_POSITION, light0_pos);
+    }
+};
+
+/////////////////////////////////////////////////////////////////// BODY MODEL
+
+class Object
+{
+
+private:
+    int shape;   //  RECTANGULARPRISM  CYLINDER    SPHERE
+    double dim1; //  width             radius	  radius
+    double dim2; //  height            height      -
+    double dim3; //  depth             -           -
+
+    void draw(void)
+    {
+
+        if (shape == RECTANGULARPRISM)
+        {
+            glScaled(dim1, dim2, dim3);
+            glutSolidCube(1.0);
+        }
+        else if (shape == CYLINDER)
+        {
+            GLUquadricObj *quadratic;
+            quadratic = gluNewQuadric();
+
+            glRotated(rotate.x, 1, 0, 0);
+            glRotated(rotate.y, 0, 1, 0);
+            glRotated(rotate.z, 0, 0, 1);
+            glTranslated(0, 0, -dim2 / 2); // To return from the midpoint
+
+            gluCylinder(quadratic, dim1, dim1, dim2, 64, 64);
+        }
+        else if (shape == SPHERE)
+        {
+            glutSolidSphere(this->dim1, 128, 128);
+        }
+    }
+
+    RGBA color;
+    Angles rotate;
+
+    // TRUE if the object is not connecting to another object
+
+    bool rootObject;
+
+    // Coordinate of the axis to which the object is attached with respect to the center of the object
+
+    Coordinates offsetOfJointToParent;
+
+public:
+    // Pointers of those objects for transported objects,
+    //and angle and offset information of those objects and their joints
+
+    std::vector<Object *> children;
+    std::vector<Angles> jointAngles;
+    std::vector<Coordinates> jointOffsets;
+
+
+    Object(int shape, bool rootObject = false)
+    {
+        // Marking the shape of the object
+        this->shape = shape;
+
+        // The state of attachment of the object
+        this->rootObject = rootObject;
+        if (rootObject)
+        {
+            // If the object is not connected to another object, the binding values are marked as 0.
+            // (required for update method)
+            Coordinates offsetOfJointToParent;
+            offsetOfJointToParent.x = offsetOfJointToParent.y = offsetOfJointToParent.z = 0;
+        }
+    }
+
+    void set(
+        double widthOrRadius, double height, double depth,
+        double red, double green, double blue,
+        double rotateX, double rotateY, double rotateZ
+        )
+    {
+
+        this->dim1 = widthOrRadius;
+        if (shape != SPHERE)
+        {
+            this->dim2 = height;
+            if (shape != CYLINDER)
+            {
+                this->dim3 = depth;
+            }
+        }
+
+        this->color.red = red;
+        this->color.green = green;
+        this->color.blue = blue;
+
+        this->rotate.x = rotateX;
+        this->rotate.y = rotateY;
+        this->rotate.z = rotateZ;
+    }
+
+    void link(
+        Object &child,
+        double jointAngleX, double jointAngleY, double jointAngleZ,
+        double parentOffsetX, double parentOffsetY, double parentOffsetZ,
+        double childOffsetX, double childOffsetY, double childOffsetZ)
+    {
+
+        this->children.push_back(&child);
+
+        Angles jointAngle = {jointAngleX, jointAngleY, jointAngleZ};
+        this->jointAngles.push_back(jointAngle);
+
+        Coordinates parentOffset = {parentOffsetX, parentOffsetY, parentOffsetZ};
+        this->jointOffsets.push_back(parentOffset);
+
+        Coordinates childOffset = {childOffsetX, childOffsetY, childOffsetZ};
+        child.offsetOfJointToParent = childOffset;
+
+        return;
+    }
+
+    void update(void)
+    {
+
+        glColor3d(this->color.red, this->color.green, this->color.blue);
+
+        glTranslated(
+            offsetOfJointToParent.x,
+            offsetOfJointToParent.y,
+            offsetOfJointToParent.z);
+
+        glPushMatrix();
+        this->draw();
+        glPopMatrix();
+
+
+        for (unsigned int i = 0, length = this->children.size(); i < length; i++)
+        {
+            // Since there may be more than one joint connected to an object,
+            // the currentmatrix is stored before scrolling for the action,
+            // and the stored matrix is returned with a pop before proceeding
+            // to the next joint.
+
+            glPushMatrix();
+
+            // Shift to the mount point of the attached object.
+            Coordinates offsets = this->jointOffsets[i];
+            glTranslated(offsets.x, offsets.y, offsets.z);
+
+            Angles angles = this->jointAngles[i];
+            glRotated(angles.x, 1, 0, 0);
+            glRotated(angles.y, 0, 1, 0);
+            glRotated(angles.z, 0, 0, 1);
+
+            this->children[i]->update();
+
+            glPopMatrix();
+        }
+
+        return;
+    }
+};
+
+// When Human methods want to update the information
+// of any body part (joint angle, etc.), it sends the
+// command to the relevant method of the Object class
+// with the following constants.
+
+#define BODY 0
+
+#define HEAD 1
+#define NECK 2
+#define LEFT_ARM 3
+#define LEFT_FOOT 4
+#define RIGHT_ARM 5
+#define RIGHT_FOOT 6
+
+#define LEFT_SHOULDER 7
+#define LEFT_HIP 8
+#define RIGHT_SHOULDER 9
+#define RIGHT_HIP 10
+
+class Human
+{
+private:
+    Object
+        body,
+        head,
+        neck,
+        leftArm,
+        leftFoot,
+        leftShoulder,
+        leftHip,
+        rightArm,
+        rightFoot,
+        rightShoulder,
+        rightHip;
+
+    // Stop point and angle of the whole skeleton
+
+    Coordinates mainPosition;
+    Angles mainAngle;
+
+    bool walking;
+    double walkingCompletionPercent;
+    double walkingTotalAnimationIteration;
+
+    bool roaming;
+    double roamingCompletionPercent;
+    double roamingTotalAnimationIteration;
+
+public:
+//    Human Constructor calls the constructors
+//    of Object objects that are member variables,
+//    and at the same time marks the cylindrical
+//    -sphere state of these objects.
+
+    Human(void)
+        : body(CYLINDER, ROOT_OBJECT),
+
+          head(SPHERE), neck(CYLINDER),
+
+          leftArm(CYLINDER), leftFoot(CYLINDER),
+
+          rightArm(CYLINDER), rightFoot(CYLINDER),
+
+          leftShoulder(SPHERE), leftHip(SPHERE),
+
+          rightShoulder(SPHERE), rightHip(SPHERE)
+    {
+        walkingCompletionPercent = 0;
+        walking = false;
+        roaming = false;
+
+        mainPosition = {0, -0.07, 0};
+        mainAngle = {0, 0, 0};
+        return;
+    }
+    void init(void)
+    {
+//        Its job is to define size, color, internal rotation
+//        for each body part and link the parts according to
+//        the parent-child relationship.
+
+        head.set(
+            0.5, 0, 0, // radius / empty / empty
+            0.95, 0.2, 0.3, // color
+            0, 0, 0    // rotation
+        );
+
+        neck.set(            // radius / height / empty
+            0.1, 0.2, 0,     // color
+            0.6, 0.9, 0.94, // rotation
+            90, 0, 0);
+
+        body.set(
+            0.5, 1.3, 0, // radius / height / empty
+            0.97, 1.0, 0.95,   // color
+            90, 0, 0     // rotation
+        );
+
+        rightShoulder.set(
+            0.1001, 0, 0, // radius / empty / empty
+            0.1, 0.2, 0.3,      // color
+            0, 0, 0       // rotation
+        );
+        rightArm.set(
+            0.1, 0.7, 0,      // radius / height / empty
+            0.2, 0.6, 0.7, // color
+            0, 90, 0          // rotation
+        );
+
+        leftShoulder.set(
+            0.1001, 0, 0, // radius / empty / empty
+            0.1, 0.2, 0.3,      // color
+            0, 0, 0       // rotation
+        );
+        leftArm.set(
+            0.1, 0.7, 0,      // radius / height / empty
+            0.2, 0.6, 0.7, // color
+            0, 90, 0          // rotation
+        );
+
+        rightHip.set(
+            0.1001, 0, 0, // radius / empty / empty
+            0.1, 0.2, 0.3,      // color
+            0, 0, 0       // rotation
+        );
+        rightFoot.set(
+            0.1, 1.0, 0,      // radius / height / empty
+            0.2, 0.6, 0.7, // color
+            90, 0, 90         // rotation
+        );
+
+        leftHip.set(
+            0.1001, 0, 0, // radius / empty / empty
+            0.1, 0.2, 0.3,      // color
+            0, 0, 0       // rotation
+        );
+        leftFoot.set(
+            0.1, 1.0, 0,      // radius / height / empty
+            0.2, 0.6, 0.7, // color
+            90, 0, 90         // rotation
+        );
+
+        // JOINING PARTS (SKELETON)
+
+        body.link(         // parent
+            rightShoulder, // child
+            0, 0, 0,       // joint angle
+            -0.5, 0.3, 0,  // parent offset
+            0, 0, 0        // child offset
+        );
+        rightShoulder.link( // parent
+            rightArm,       // child
+            0, 0, 50,       // joint angle
+            0, 0, 0,        // parent offset
+            -0.35, 0, 0     // child offset
+        );
+        body.link(        // parent
+            leftShoulder, // child
+            0, 0, 0,      // joint angle
+            0.5, 0.3, 0,  // parent offset
+            0, 0, 0       // child offset
+        );
+        leftShoulder.link( // parent
+            leftArm,       // child
+            0, 0, -50,     // joint angle
+            0, 0, 0,       // parent offset
+            0.35, 0, 0     // child offset
+        );
+
+        body.link(          // parent
+            leftHip,        // child
+            0, 0, -10,      // joint angle
+            -0.2, -0.65, 0, // parent offset
+            0, 0, 0         // child offset
+        );
+        leftHip.link(  // parent
+            leftFoot,  // child
+            0, 0, 0,   // joint angle
+            0, 0, 0,   // parent offset
+            0, -0.5, 0 // child offset
+        );
+
+        body.link(         // parent
+            rightHip,      // child
+            0, 0, 10,      // joint angle
+            0.2, -0.65, 0, // parent offset
+            0, 0, 0        // child offset
+        );
+        rightHip.link( // parent
+            rightFoot, // child
+            0, 0, 0,   // joint angle
+            0, 0, 0,   // parent offset
+            0, -0.5, 0 // child offset
+        );
+
+        body.link(      // parent
+            neck,       // child
+            0, 0, 0,    // joint angle
+            0, 0.65, 0, // parent offset
+            0, 0.1, 0   // child offset
+        );
+        neck.link(     // parent
+            head,      // child
+            0, 0, 0,   // joint angle
+            0, 0.1, 0, // parent offset
+            0, 0.5, 0  // child offset
+        );
+    }
+    void update(void)
+    {
+
+        glPushMatrix();
+
+        roamingAnimation();
+
+        glTranslated(mainPosition.x, mainPosition.y, mainPosition.z);
+        glRotated(mainAngle.x, 1, 0, 0);
+        glRotated(mainAngle.y, 0, 1, 0);
+        glRotated(mainAngle.z, 0, 0, 1);
+
+        walkAnimation();
+
+        glPushMatrix();
+
+        glTranslated(0.0, 1.7, 0.0);
+
+
+        body.update();
+
+        glPopMatrix();
+
+        glPopMatrix();
+    }
+
+    void setMainCoordinates(double x, double y, double z)
+    {
+        mainPosition.x = x;
+        mainPosition.y = y;
+        mainPosition.z = z;
+    }
+    void raiseMainCoordinates(double x, double y, double z)
+    {
+        mainPosition.x += x;
+        mainPosition.y += y;
+        mainPosition.z += z;
+    }
+
+    void raiseAngle(int partNumber, int direction, double angle)
+    {
+        switch (partNumber)
+        {
+
+        case RIGHT_FOOT:
+            if (direction == X)
+                rightHip.jointAngles[0].x += angle;
+            else if (direction == Y)
+                rightHip.jointAngles[0].y += angle;
+            else if (direction == Z)
+                rightHip.jointAngles[0].z += angle;
+            break;
+
+        case LEFT_FOOT:
+            if (direction == X)
+                leftHip.jointAngles[0].x += angle;
+            else if (direction == Y)
+                leftHip.jointAngles[0].y += angle;
+            else if (direction == Z)
+                leftHip.jointAngles[0].z += angle;
+            break;
+        }
+    }
+    void setAngle(int partNumber, int direction, double angle)
+    {
+        switch (partNumber)
+        {
+
+        case RIGHT_FOOT:
+            if (direction == X)
+                rightHip.jointAngles[0].x += angle;
+            else if (direction == Y)
+                rightHip.jointAngles[0].y += angle;
+            else if (direction == Z)
+                rightHip.jointAngles[0].z += angle;
+            break;
+
+        case LEFT_FOOT:
+            if (direction == X)
+                leftHip.jointAngles[0].x += angle;
+            else if (direction == Y)
+                leftHip.jointAngles[0].y += angle;
+            else if (direction == Z)
+                leftHip.jointAngles[0].z += angle;
+            break;
+        }
+    }
+
+    void startWalking(unsigned int a = 175)
+    {
+        walkingTotalAnimationIteration = a;
+        walking = true;
+    }
+    void stopWalking(void)
+    {
+        walking = false;
+    }
+    void toggleWalking(void)
+    {
+        if (walking)
+        {
+            if (roaming)
+            {
+                stopWalking();
+                toggleRoaming();
+            }
+            else
+                startRoaming();
+        }
+        else
+            startWalking();
+    }
+    void walkAnimation(void)
+    {
+        if (!walking)
+            return;
+
+        double frameAngleX = 2 * std::cos(walkingCompletionPercent * 360 * PI / 180);
+        double framePositionY = 0.05 * std::cos(walkingCompletionPercent * 2 * 360 * PI / 180) - 0.075;
+
+        setAngle(RIGHT_FOOT, X, frameAngleX);
+        setAngle(LEFT_FOOT, X, -frameAngleX);
+
+        mainPosition.y = framePositionY;
+
+        walkingCompletionPercent += (1 / walkingTotalAnimationIteration);
+        if (walkingCompletionPercent >= 1.0)
+            walkingCompletionPercent -= 1.0;
+    }
+
+    void startRoaming(unsigned int a = 812)
+    {
+        roamingTotalAnimationIteration = a;
+        roaming = true;
+    }
+    void stopRoaming(void)
+    {
+        roaming = false;
+        mainPosition.z = mainPosition.x = 0;
+        mainAngle.y = 0;
+    }
+    void toggleRoaming(void)
+    {
+        if (roaming)
+            stopRoaming();
+        else
+            startRoaming();
+    }
+    void roamingAnimation(void)
+    {
+        if (!roaming)
+            return;
+
+        double framePositionZ = 3 * std::sin(roamingCompletionPercent * 360 * PI / 180);
+        mainPosition.z = framePositionZ;
+
+        double framePositionX = 3 * std::sin((roamingCompletionPercent + 0.25) * 360 * PI / 180);
+        mainPosition.x = framePositionX;
+
+        mainAngle.y = -roamingCompletionPercent * 360.0;
+
+        roamingCompletionPercent += (0.8 / roamingTotalAnimationIteration);
+        if (roamingCompletionPercent >= 1.0)
+            roamingCompletionPercent -= 1.0;
+    }
+};
+
+/////////////////////////////////////////////////////////////////// MASTER CLASS
+
+class GLHandler
+{
+private:
+    Light light;
+    Camera camera;
+    Human model1;
+
+public:
+    void init(void)
+    {
+
+        glMatrixMode(GL_PROJECTION);                   // for perspective
+        glLoadIdentity();                              // Unit matrix
+        gluPerspective(20, 1600.0 / 900.0, 0.1, 1000); // angle, ratio, near, far
+        glMatrixMode(GL_MODELVIEW);                    // for scene drawing
+
+        // Obstacle in camera's perspective
+        // to avoid scratching the objects behind it
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+
+        light.init();
+
+        camera.setOrigin(0, 3, 0);
+        camera.setPosition(0, 3, 30);
+
+        model1.init();
+    }
+    void display(void)
+    {
+        glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+        // Reports the current location of the camera to OpenGL
+        camera.update();
+
+        // Reports the current position of the light to OpenGL
+        light.update();
+
+        // Draws fixed models in the scene (they are there to feel walking)
+        drawStaticModels();
+
+        // Draws the skeleton in its current form. (animations are handled by this class)
+        model1.update();
+
+        glutSwapBuffers();
+    }
+
+    void drawStaticModels(void)
+    {
+        // circle
+        glPushMatrix();
+        glColor3d(0.01, 0.9, 0);
+        glTranslated(-1.0, 6, -1.0);
+        glRotated(0, 1, 0, 0);
+        glutSolidSphere(2, 30, 10);
+        glPopMatrix();
+        // cone
+        glPushMatrix();
+        glColor3d(0.5, 0.2, 0);
+        glTranslated(-1.0, 0, -1.0);
+        glRotated(-90, 1, 0, 0);
+        glutSolidCone(1 ,8 ,5 ,10);
+        glPopMatrix();
+        // box
+        glPushMatrix();
+        glColor3d(1, 0.3, 0.3);
+        glTranslated(1.0, 0.35, 1.0);
+        glRotated(30, 0, 1, 0);
+        glutSolidCube(0.7);
+        glPopMatrix();
+        // teapot
+        glPushMatrix();
+        glColor3d(1, 0.7, 0.8);
+        glTranslated(1.0, 0.95, 1.0);
+        glutSolidTeapot(0.3);
+        glPopMatrix();
+        // earth
+        glPushMatrix();
+        glColor3d(0.01, 0.9, 0);
+        glScaled(15.0, 0.05, 15.0);
+        glutSolidCube(1.0);
+        glPopMatrix();
+    }
+
+    void mouse(int button, int state, int x, int y)
+    {
+        if (state == GLUT_DOWN)
+        { // mouse click
+            switch (button)
+            {
+            case GLUT_RIGHT_BUTTON:
+                break;
+            case GLUT_LEFT_BUTTON:
+                model1.toggleWalking(); // walk
+                break;
+            }
+        }
+    }
+    void idle(void)
+    {
+//        When data is received from the input devices,
+//        only the information of the objects is updated.
+//        Reboot is only provided by idle in terms of
+//        frequency stabilization.
+        glutPostRedisplay();
+    }
+};
+
+/////////////////////////////////////////////////////////////////// MAIN
+
+
+GLHandler gl;
+
+int main(int argc, char **argv)
+{
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_RGB | GLUT_DEPTH | GLUT_DOUBLE);
+
+    glutInitWindowPosition(0, 0);
+    glutInitWindowSize(1300, 700);
+    glutCreateWindow("Mahdi's Graphic Project");
+
+    gl.init();
+
+    glutDisplayFunc([](void) -> void { gl.display(); });
+    glutMouseFunc([](int button, int state, int x, int y) -> void { gl.mouse(button, state, x, y); });
+    glutIdleFunc([](void) -> void { gl.idle(); });
+
+    glutMainLoop();
+    return 0;
+}

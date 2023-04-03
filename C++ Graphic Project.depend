@@ -1,0 +1,11 @@
+# depslib dependency file v1.0
+1657692798 source:e:\ap2\project\c++ graphic project\main.cpp
+	<iostream>
+	<vector>
+	<cmath>
+	<OpenGL/gl.h>
+	<GLUT/glut.h>
+	<glut.h>
+	<GL/gl.h>
+	<GL/glut.h>
+
